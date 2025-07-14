@@ -1,0 +1,3 @@
+# requirements.txt
+# Specify Flask and any other Python packages your application needs
+Flask==2.0.2 # You can specify a different version if needed
