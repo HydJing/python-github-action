@@ -183,3 +183,35 @@ jobs:
         with:
           name: trivy-security-report
           path: trivy-results.txt
+  deploy-to-staging:
+    runs-on: ubuntu-latest
+    needs: docker-image-security-scan # Deploy only if all CI and security checks pass
+    environment:
+      name: staging
+      url: https://your-staging-app.example.com # Replace with your actual staging URL
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Docker Image (optional, only if needed for deployment tool)
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-artifact # Note: This artifact was from the old build step.
+                                      # If you push to a registry, you'd pull from there.
+                                      # Example: docker pull ghcr.io/org/image:${{ github.sha }}
+
+      - name: Deploy to Staging Environment
+        run: |
+          echo "Deploying to staging..."
+          # Add your actual deployment commands here.
+          # This could be kubectl apply, AWS CLI commands, Azure CLI, Helm, Terraform, etc.
+          # Example for a simple deployment using a pre-built Docker image:
+          # Assuming you have an SSH key or cloud provider credentials configured as secrets
+          # ssh user@your-staging-server "docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} && docker stop my-app || true && docker rm my-app || true && docker run -d --name my-app -p 80:5000 ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Staging deployment complete. Access at ${{ env.ACTUAL_STAGING_URL }}"
+        env:
+          # Define environment-specific variables here if needed
+          ACTUAL_STAGING_URL: https://your-staging-app.example.com
+          # Example of using secrets for deployment credentials
+          # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_STAGING_ACCESS_KEY_ID }}
+          # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_STAGING_SECRET_ACCESS_KEY }}
