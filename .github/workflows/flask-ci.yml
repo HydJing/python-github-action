@@ -215,3 +215,27 @@ jobs:
           # Example of using secrets for deployment credentials
           # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_STAGING_ACCESS_KEY_ID }}
           # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_STAGING_SECRET_ACCESS_KEY }}
+          
+  deploy-to-production:
+    runs-on: ubuntu-latest
+    needs: deploy-to-staging # Only deploy to production after successful staging deployment
+    environment:
+      name: production
+      url: https://your-production-app.example.com # Replace with your actual production URL
+    # Manual approval is configured via GitHub Environment protection rules, not in the workflow file.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Production Environment
+        run: |
+          echo "Deploying to production..."
+          # Add your actual production deployment commands here.
+          # This should pull the exact same image that was deployed to staging.
+          # Example: docker pull ghcr.io/org/image:${{ github.sha }}
+          echo "Production deployment complete. Access at ${{ env.ACTUAL_PROD_URL }}"
+        env:
+          # Define environment-specific variables here if needed
+          ACTUAL_PROD_URL: https://your-production-app.example.com
+          # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_PROD_ACCESS_KEY_ID }}
+          # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PROD_SECRET_ACCESS_KEY }}
