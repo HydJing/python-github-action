@@ -11,10 +11,13 @@ on:
 env:
   PYTHON_VERSION: '3.9' # Centralize Python version for easier management
   IMAGE_NAME: 'flask-app' # Centralize image name
-  
+
 jobs:
+  # 1. Linting Job: Ensures code quality and style consistency
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # Read-only access to clone the repository
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,85 +42,138 @@ jobs:
           pip install flake8 black # Install linters
 
       - name: Run Flake8 Linting
+        # Consider removing --exit-zero for stricter enforcement
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
-        # `exit-zero` allows the workflow to pass even with linting warnings,
-        # but the statistics output will clearly show issues.
-        # For stricter enforcement, remove `exit-zero`.
 
-      - name: Run Black Formatter Check (optional, but recommended)
+      - name: Run Black Formatter Check
+        # Consider removing --check for stricter enforcement (and let it fail if not formatted)
         run: black --check .
-        # Use `--diff` if you want to see differences without failing
-        # For strict enforcement, remove `--diff` and let it fail if not formatted.
 
-  unit-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9' # Specify your Python version
-
-      - name: Install Python dependencies for tests
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest # Install pytest for running tests
-
-      - name: Run Unit Tests
-        run: pytest
-
+  # 2. Static Application Security Testing (SAST) for Source Code
   source-code-security-scan:
     runs-on: ubuntu-latest
+    needs: lint # Run security scan after linting
+    permissions:
+      contents: read # Read-only access for code scanning
+      security-events: write # Required for uploading SARIF results (e.g., if using CodeQL)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9' # Specify your Python version
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Python dependencies for Bandit
-        run: |
-          python -m pip install --upgrade pip
-          pip install bandit # Install Bandit for static analysis
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Bandit
+        run: pip install bandit
 
       - name: Run Bandit Security Scan
-        run: bandit -r . -ll -f json -o bandit_report.json || true
-        continue-on-error: true # Allow the workflow to proceed even if security issues are found
+        # For production, consider removing '|| true' and 'continue-on-error: true'
+        # to fail the build on critical/high issues.
+        run: bandit -r . -f json -o bandit_report.json || true
+        continue-on-error: true
 
-      - name: Upload Bandit Report
+      - name: Upload Bandit Report Artifact
         uses: actions/upload-artifact@v4
         with:
           name: bandit-security-report
           path: bandit_report.json
 
-  build-docker-image:
+  # 3. Dependency Vulnerability Scan (for Python packages)
+  dependency-scan:
     runs-on: ubuntu-latest
-    needs: unit-tests # Only build if unit tests pass
+    needs: source-code-security-scan # Can run in parallel with unit tests, but depends on source
+    permissions:
+      contents: read # Read-only access to clone the repository
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Run Dependency Audit
+        # Fail the workflow if any vulnerabilities are found. Adjust exit-code as needed.
+        run: pip-audit --exit-code 1
+        # continue-on-error: false # This is the default, so no need to explicitly set
+
+  # 4. Secrets Scanning (Hardcoded credentials)
+  secrets-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Read-only access to clone the repository
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Run Gitleaks Scan
+        # This action fails the job if secrets are detected by default.
+        uses: zricethezav/gitleaks-action@v2
+        # Consider adding a .gitleaks.toml for custom rules or ignoring specific paths.
+
+  # 5. Unit Tests Job: Validates application logic
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: [lint, source-code-security-scan, dependency-scan, secrets-scan] # All pre-checks should pass
+    permissions:
+      contents: read # Read-only access to clone the repository
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build Docker Image
-        run: docker build -t flask-app-image .
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }} # Use env variable for consistency
 
-      - name: Save Docker Image to Tar
-        run: docker save flask-app-image -o flask-app-image.tar
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: Upload Docker Image Artifact
+      - name: Install Python dependencies for tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov # Install pytest and coverage tool
+
+      - name: Run Unit Tests with Coverage
+        run: pytest --cov=. --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage report artifact (optional)
         uses: actions/upload-artifact@v4
         with:
-          name: docker-image-artifact
-          path: flask-app-image.tar
+          name: coverage-report
+          path: coverage.xml
+
+  # 6. Build and Push Docker Image to Container Registry
   build-and-push-docker-image:
     runs-on: ubuntu-latest
-    needs: [source-code-security-scan] # Only build/push if previous steps (lint, test, static scan) pass
+    needs: unit-tests # Only build/push if unit tests pass
     permissions:
       contents: read # For checking out code
       packages: write # Required to push to GitHub Container Registry (ghcr.io)
@@ -135,7 +191,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          # For other registries (e.g., Docker Hub), use:
+          # If using Docker Hub:
           # username: ${{ secrets.DOCKER_USERNAME }}
           # password: ${{ secrets.DOCKER_PASSWORD }}
 
@@ -145,8 +201,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }} # 'latest' only on main branch pushes
-            type=sha,format=long # Tag with full commit SHA
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=long
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
@@ -155,107 +211,177 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha # Cache Docker layers using GitHub Actions cache
+          cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # 7. Docker Image Vulnerability Scan (DAST for containers)
   docker-image-security-scan:
     runs-on: ubuntu-latest
-    needs: build-docker-image # Only scan image if it was successfully built
+    needs: build-and-push-docker-image # Scan the image after it's built and pushed
+    permissions:
+      contents: read # To checkout code (if Trivy needs it for context)
+      packages: read # To pull the image from ghcr.io
     steps:
-      - name: Download Docker Image Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-artifact
-
-      - name: Load Docker Image from Tar
-        run: docker load -i flask-app-image.tar
+      - name: Checkout code (optional, only if Trivy needs context from repo files)
+        uses: actions/checkout@v4
 
       - name: Run Trivy Docker Image Scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'flask-app-image'
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}'
           format: 'table'
           output: 'trivy-results.txt'
+          # For production, set exit-code to '1' and remove continue-on-error for strictness
           exit-code: '0' # Do not fail the workflow on vulnerabilities, just report them
+          severity: 'HIGH,CRITICAL' # Only report high and critical vulnerabilities
+          vuln-type: 'os,library'
 
-      - name: Upload Trivy Scan Results
+      - name: Upload Trivy Scan Results Artifact
         uses: actions/upload-artifact@v4
         with:
           name: trivy-security-report
           path: trivy-results.txt
+
+  # 8. Software Bill of Materials (SBOM) Generation
+  generate-sbom:
+    runs-on: ubuntu-latest
+    needs: build-and-push-docker-image # Generate SBOM for the built image
+    permissions:
+      contents: read # To checkout code
+      packages: read # To pull image for SBOM generation
+    steps:
+      - name: Generate SBOM with Syft
+        uses: anchore/syft-action@v0.12.0 # Check for latest version on marketplace
+        with:
+          image: 'ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          output: 'syft-sbom.spdx.json' # Standard SPDX format
+          format: 'spdx-json'
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-report
+          path: syft-sbom.spdx.json
+
+  # 9. Deployment to Staging Environment
   deploy-to-staging:
     runs-on: ubuntu-latest
-    needs: docker-image-security-scan # Deploy only if all CI and security checks pass
+    needs: [docker-image-security-scan, generate-sbom] # Deploy only if security scans & SBOM pass
     environment:
       name: staging
       url: https://your-staging-app.example.com # Replace with your actual staging URL
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-staging # Ensures only one staging deployment per branch
+      cancel-in-progress: true # Cancels any previous run in this group if a new one starts
+    permissions:
+      contents: read # To checkout code (if deployment script needs it)
+      id-token: write # For OIDC authentication to cloud providers (recommended)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download Docker Image (optional, only if needed for deployment tool)
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-artifact # Note: This artifact was from the old build step.
-                                      # If you push to a registry, you'd pull from there.
-                                      # Example: docker pull ghcr.io/org/image:${{ github.sha }}
+      # Example: Configure AWS Credentials using OIDC (replace with your cloud provider)
+      # - name: Configure AWS Credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::123456789012:role/MyGitHubActionsStagingRole
+      #     aws-region: us-east-1
 
       - name: Deploy to Staging Environment
         run: |
           echo "Deploying to staging..."
+          # Pull the exact image from GHCR that passed all checks
+          docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           # Add your actual deployment commands here.
-          # This could be kubectl apply, AWS CLI commands, Azure CLI, Helm, Terraform, etc.
-          # Example for a simple deployment using a pre-built Docker image:
-          # Assuming you have an SSH key or cloud provider credentials configured as secrets
-          # ssh user@your-staging-server "docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} && docker stop my-app || true && docker rm my-app || true && docker run -d --name my-app -p 80:5000 ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          # Example for Kubernetes:
+          # kubectl apply -f kubernetes/staging-deployment.yaml
+          # Or for ECS/EC2/Azure App Service:
+          # aws ecs update-service --cluster my-cluster --service my-staging-service --force-new-deployment
+          # az webapp deployment container config --name my-app-staging --resource-group my-rg --docker-image ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           echo "Staging deployment complete. Access at ${{ env.ACTUAL_STAGING_URL }}"
         env:
-          # Define environment-specific variables here if needed
           ACTUAL_STAGING_URL: https://your-staging-app.example.com
-          # Example of using secrets for deployment credentials
+          # Add environment-specific secrets here for cloud credentials if not using OIDC
           # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_STAGING_ACCESS_KEY_ID }}
           # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_STAGING_SECRET_ACCESS_KEY }}
-          
+
+  # 10. Deployment to Production Environment
   deploy-to-production:
     runs-on: ubuntu-latest
     needs: deploy-to-staging # Only deploy to production after successful staging deployment
     environment:
       name: production
       url: https://your-production-app.example.com # Replace with your actual production URL
-    # Manual approval is configured via GitHub Environment protection rules, not in the workflow file.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-production # Ensures only one production deployment
+      cancel-in-progress: true
+    permissions:
+      contents: read # To checkout code (if deployment script needs it)
+      id-token: write # For OIDC authentication to cloud providers (recommended)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Example: Configure AWS Credentials using OIDC (replace with your cloud provider)
+      # - name: Configure AWS Credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::123456789012:role/MyGitHubActionsProductionRole
+      #     aws-region: us-east-1
+
       - name: Deploy to Production Environment
         run: |
           echo "Deploying to production..."
+          # Pull the exact image from GHCR that was deployed to staging
+          docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           # Add your actual production deployment commands here.
-          # This should pull the exact same image that was deployed to staging.
-          # Example: docker pull ghcr.io/org/image:${{ github.sha }}
+          # Ensure this pulls the exact same image and uses a robust deployment strategy (e.g., Blue/Green, Canary).
           echo "Production deployment complete. Access at ${{ env.ACTUAL_PROD_URL }}"
         env:
-          # Define environment-specific variables here if needed
           ACTUAL_PROD_URL: https://your-production-app.example.com
+          # Add environment-specific secrets here for cloud credentials if not using OIDC
           # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_PROD_ACCESS_KEY_ID }}
           # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PROD_SECRET_ACCESS_KEY }}
+
+  # 11. Notification on Pipeline Failure
   notify-on-failure:
     runs-on: ubuntu-latest
     needs:
       - lint
-      - unit-tests
       - source-code-security-scan
+      - dependency-scan
+      - secrets-scan
+      - unit-tests
       - build-and-push-docker-image
       - docker-image-security-scan
+      - generate-sbom
       - deploy-to-staging
       - deploy-to-production
-    if: failure() # This job runs only if any of the `needs` jobs fail
+    if: failure()
+    permissions:
+      contents: read # Basic read for context
     steps:
       - name: Send Slack Notification
         uses: rtCamp/action-slack-notify@v2
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_CHANNEL: '#devops-alerts' # Or your preferred channel
+          SLACK_CHANNEL: '#devops-alerts'
           SLACK_COLOR: 'danger'
           SLACK_MESSAGE: "CI/CD Pipeline failed for ${{ github.repository }} on commit `${{ github.sha }}`. Check details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_USERNAME: 'GitHub Actions Bot'
+
+  # 12. Notification on Production Deployment Success (Optional, but good for visibility)
+  notify-on-success:
+    runs-on: ubuntu-latest
+    needs: deploy-to-production # Only trigger after a successful production deployment
+    if: success()
+    permissions:
+      contents: read # Basic read for context
+    steps:
+      - name: Send Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: '#devops-releases' # Dedicated channel for releases
+          SLACK_COLOR: 'good'
+          SLACK_MESSAGE: "🚀 Production deployment successful for ${{ github.repository }}! Commit: `${{ github.sha }}`. Details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Access: https://your-production-app.example.com"
           SLACK_USERNAME: 'GitHub Actions Bot'
