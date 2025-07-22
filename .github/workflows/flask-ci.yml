@@ -214,6 +214,35 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  mutation-tests:
+    runs-on: ubuntu-latest
+    needs: unit-tests # Needs successful unit tests to be meaningful
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install dependencies for mutation testing
+        run: |
+          pip install -r requirements.txt
+          pip install mutmut
+      - name: Run Mutation Tests
+        # Configure mutmut to exit with a non-zero code if the mutation score is too low.
+        # Example: --cut-off 90 will fail if score is below 90%
+        run: mutmut run --paths-to-mutate "app/" --tests-dir "tests/" --cut-off 90 || true # Adjust app/ and tests/ paths
+        continue-on-error: true # Consider changing to false for strict quality gate
+
   # 7. Docker Image Vulnerability Scan (DAST for containers)
   docker-image-security-scan:
     runs-on: ubuntu-latest
