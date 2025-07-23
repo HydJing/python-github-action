@@ -169,8 +169,38 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+  # 6. Mutation Testing
+  mutation-tests:
+    runs-on: ubuntu-latest
+    needs: unit-tests # Needs successful unit tests to be meaningful
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Cache Python dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install dependencies for mutation testing
+        run: |
+          pip install -r requirements.txt
+          pip install mutmut
+      - name: Run Mutation Tests
+        # Configure mutmut to exit with a non-zero code if the mutation score is too low.
+        # Example: --cut-off 90 will fail if score is below 90%
+        run: mutmut run --paths-to-mutate "app/" --tests-dir "tests/" --cut-off 90 || true # Adjust app/ and tests/ paths
+        continue-on-error: true # Consider changing to false for strict quality gate
 
-  # 6. Build and Push Docker Image to Container Registry
+
+  # 7. Build and Push Docker Image to Container Registry
   build-and-push-docker-image:
     runs-on: ubuntu-latest
     needs: unit-tests # Only build/push if unit tests pass
@@ -214,36 +244,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  mutation-tests:
-    runs-on: ubuntu-latest
-    needs: unit-tests # Needs successful unit tests to be meaningful
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Cache Python dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-      - name: Install dependencies for mutation testing
-        run: |
-          pip install -r requirements.txt
-          pip install mutmut
-      - name: Run Mutation Tests
-        # Configure mutmut to exit with a non-zero code if the mutation score is too low.
-        # Example: --cut-off 90 will fail if score is below 90%
-        run: mutmut run --paths-to-mutate "app/" --tests-dir "tests/" --cut-off 90 || true # Adjust app/ and tests/ paths
-        continue-on-error: true # Consider changing to false for strict quality gate
-
-  # 7. Docker Image Vulnerability Scan (DAST for containers)
+  
+  # 8. Docker Image Vulnerability Scan (DAST for containers)
   docker-image-security-scan:
     runs-on: ubuntu-latest
     needs: build-and-push-docker-image # Scan the image after it's built and pushed
@@ -271,7 +273,7 @@ jobs:
           name: trivy-security-report
           path: trivy-results.txt
 
-  # 8. Software Bill of Materials (SBOM) Generation
+  # 9. Software Bill of Materials (SBOM) Generation
   generate-sbom:
     runs-on: ubuntu-latest
     needs: build-and-push-docker-image # Generate SBOM for the built image
@@ -291,7 +293,7 @@ jobs:
           name: sbom-report
           path: syft-sbom.spdx.json
 
-  # 9. Deployment to Staging Environment
+  # 10. Deployment to Staging Environment
   deploy-to-staging:
     runs-on: ubuntu-latest
     needs: [docker-image-security-scan, generate-sbom] # Deploy only if security scans & SBOM pass
@@ -332,6 +334,46 @@ jobs:
           # Add environment-specific secrets here for cloud credentials if not using OIDC
           # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_STAGING_ACCESS_KEY_ID }}
           # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_STAGING_SECRET_ACCESS_KEY }}
+
+  # 11. Staging Smoke Test
+  staging-smoke-test:
+    runs-on: ubuntu-latest
+    needs: deploy-to-staging
+    environment: staging # Associate with the staging environment
+    permissions:
+      contents: read
+    steps:
+      - name: Install HTTPX for simple testing
+        run: pip install httpx
+      - name: Run Basic Health Check
+        run: |
+          STAGING_URL="${{ vars.STAGING_URL || 'https://your-staging-app.example.com' }}"
+          # Simple GET request, check status code and basic response time
+          RESPONSE=$(python -c "
+          import httpx
+          import time
+          start_time = time.time()
+          try:
+              response = httpx.get('$STAGING_URL/health', timeout=10) # Assuming a /health endpoint
+              response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+              duration = (time.time() - start_time) * 1000 # milliseconds
+              print(f'Health check to {response.url} successful. Took {duration:.2f}ms. Status: {response.status_code}')
+              if duration > 500: # Fail if response time is too high
+                  print('Health check response time is too slow!')
+                  exit(1)
+          except httpx.RequestError as exc:
+              print(f'An error occurred while requesting {exc.request.url!r}: {exc}')
+              exit(1)
+          except httpx.HTTPStatusError as exc:
+              print(f'Error response {exc.response.status_code} while requesting {exc.request.url!r}: {exc}')
+              exit(1)
+          ")
+          echo "$RESPONSE"
+        env:
+          # Use the actual staging URL that was deployed to
+          ACTUAL_STAGING_URL: ${{ vars.STAGING_URL || 'https://your-staging-app.example.com' }}
+
+
 
   # 10. Deployment to Production Environment
   deploy-to-production:
