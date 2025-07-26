@@ -1,3 +1,3 @@
-    # requirements.txt
-    Flask==2.3.3 # Updated to a more recent, compatible Flask version
-    
+# requirements.txt
+Flask==2.3.3 # Or your specific Flask version
+gunicorn==21.2.0 # Or your specific Gunicorn version   
