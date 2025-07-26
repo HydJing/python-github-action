@@ -243,6 +243,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: | # Add this section
+            APP_VERSION=${{ github.sha }} # Pass the commit SHA as the app version
 
   
   # 8. Docker Image Vulnerability Scan (DAST for containers)
