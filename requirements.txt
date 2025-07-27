@@ -1,3 +1,14 @@
 # requirements.txt
 Flask==2.3.3 # Or your specific Flask version
 gunicorn==21.2.0 # Or your specific Gunicorn version   
+
+# Testing dependencies (used in CI/CD, good to include for local dev setup)
+pytest==7.4.0
+pytest-cov==4.1.0 # For code coverage reports
+
+# HTTP client for potential health checks or external API calls within the app
+# or for smoke/performance testing scripts that run within the container context
+httpx==0.27.0 # Or specific version you choose
+
+# Mutation testing (if integrated into your workflow and run via pip)
+# mutmut==2.4.0 # Uncomment if you're directly installing mutmut via this file
